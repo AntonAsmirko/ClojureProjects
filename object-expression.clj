@@ -7,6 +7,7 @@
 (declare Negate)
 (declare Exp)
 (declare Ln)
+(declare Constant)
 
 (defn proto-get [obj key]
   (cond
@@ -26,6 +27,7 @@
 (def diff (method :diff))
 (def evaluate (method :evaluate))
 (def toString (method :toString))
+(def toStringSuffix (method :toStringSuffix))
 
 (defn placeholder-cons [this val]
   {
@@ -33,74 +35,82 @@
    :val       val
    })
 
+;(declare const-proto)
+;(def zero (placeholder-cons const-proto 0))
+;(def one (placeholder-cons const-proto 1))
+
 (def const-proto
   {
-   :diff     (fn [this var] ((constructor placeholder-cons const-proto) 0))
-   :evaluate (fn [this m] (this :val))
-   :toString (fn [this] (format "%.1f" (this :val)))
+   :diff           (fn [this var] (Constant 0))
+   :evaluate       (fn [this m] (this :val))
+   :strRep         (fn [this] (format "%.1f" (this :val)))
+   :toString       (fn [this] ((method :strRep) this))
+   :toStringSuffix (fn [this] ((method :strRep) this))
    })
 
 (def var-proto
   {
-   :diff     (fn [this var] ((constructor placeholder-cons const-proto) (if (= var (this :val)) 1 0)))
-   :evaluate (fn [this m] (m (this :val)))
-   :toString (fn [this] (this :val))
+   :diff           (fn [this var] (if (= var (this :val)) (Constant 1) (Constant 0)))
+   :evaluate       (fn [this m] (m (string/lower-case (first (this :val)))))
+   :strRep         (fn [this] (this :val))
+   :toString       (fn [this] ((method :strRep) this))
+   :toStringSuffix (fn [this] ((method :strRep) this))
    })
 
 (defn Constant [val] (placeholder-cons const-proto val))
 (defn Variable [val] (placeholder-cons var-proto val))
 
-(defn add-sub-diff [f args]
+(defn common-diff [args diff-args diff-f]
   (fn [_ var]
-    (apply f (mapv (fn [a] (diff a var)) args))))
+    (let [a (nth args 0)
+          b (nth args 1)
+          dif (diff-args var)
+          ad (force (nth dif 0))
+          bd (force (nth dif 1))]
+      (diff-f a b ad bd))))
 
-(defn quotient-diff [_ args]
+
+(defn add-diff [_ _ ad bd]
+  (Add ad bd))
+
+(defn sub-diff [_ _ ad bd]
+  (Subtract ad bd))
+
+(defn quotient-diff [a b ad bd]
+  (Divide
+    (Subtract
+      (Multiply b ad)
+      (Multiply a bd))
+    (Multiply b b)))
+
+(defn mult-diff [a b ad bd]
+  (Add
+    (Multiply ad b)
+    (Multiply bd a)))
+
+(defn negate-diff [ad]
   (fn [_ var]
-    (let [a (nth args 0) b (nth args 1)]
-      (Divide
-        (Subtract
-          (Multiply b (diff a var))
-          (Multiply a (diff b var)))
-        (Multiply b b)))))
+    (Negate (force (nth (ad var) 0)))))
 
-(defn mult-diff [_ args]
-  (fn [_ var]
-    (let [a (nth args 0) b (nth args 1)]
-      (Add
-        (Multiply (diff a var) b)
-        (Multiply (diff b var) a)))))
-
-(defn negate-diff [_ args]
-  (fn [_ var]
-    (let [arg (first args)]
-      (Negate (diff arg var)))))
-
-(defn op-op [arg]
-  (cond (= "add" arg) Add
-        (= "subtract" arg) Subtract
-        (= "multiply" arg) Multiply
-        (= "divide" arg) Divide
-        (= "negate" arg) Negate
-        (= "exp" arg) Exp
-        (= "ln") Ln))
+(defn op-map [arg]
+  (let [arg-str (str arg)]
+    (cond (= "+" arg-str) Add
+          (= "-" arg-str) Subtract
+          (= "*" arg-str) Multiply
+          (= "/" arg-str) Divide
+          (= "negate" arg-str) Negate
+          (= "exp" arg-str) Exp
+          (= "ln" arg-str) Ln
+          :else nil)))
 
 (defn op-cons [this f diff type args]
   {
    :prototype this
    :f         f
    :args      args
-   :diff      (diff (op-op type) args)
+   :diff      diff
    :type      type
    })
-
-(defn op-str [op]
-  (cond (= op "add") "+"
-        (= op "subtract") "-"
-        (= op "divide") "/"
-        (= op "multiply") "*"
-        (= op "negate") "negate"
-        (= op "exp") "exp"
-        (= op "ln") "ln"))
 
 (defn safe-division [a b]
   (if (or (= b 0) (= b 0.0))
@@ -111,66 +121,135 @@
 
 (def op-proto
   {
-   :evaluate (fn [this m]
-               (apply (this :f) (mapv (fn [a] (evaluate a m)) (this :args))))
-   :toString (fn [this] (str "(" (op-str (this :type)) " " (string/join " " (mapv toString (this :args))) ")"))
+   :evaluate       (fn [this m]
+                     (apply (this :f) (mapv (fn [a] (evaluate a m)) (this :args))))
+   :toString       (fn [this] (str "(" (this :type) " " (string/join " " (mapv toString (this :args))) ")"))
+   :toStringSuffix (fn [this] (str "(" (string/join " " (mapv toStringSuffix (this :args))) " " (this :type) ")"))
    })
 
-(def divide-proto
-  {
-   :prototype op-proto
-   :evaluate  (fn [this m] (apply safe-division (mapv (fn [a] (evaluate a m)) (this :args))))
-   })
-
-(def ln-proto
-  {
-   :prototype op-proto
-   :evaluate  (fn [this m] (Math/log (Math/abs (evaluate (nth (this :args) 0) m))))
-   })
-
-(defn op-op [arg]
-  (cond (= arg "add") Add
-        (= arg "subtract") Subtract
-        (= arg "multiply") Multiply
-        (= arg "divide") Divide
-        (= arg "negate") Negate
-        (= arg "exp") Exp
-        (= arg "ln") Ln
-        :else nil))
-
-(defn exp-diff [_ args]
+(defn exp-diff [a ad]
   (fn [_ var]
-    (Multiply (diff  (nth args 0) var) (Exp (nth args 0)))))
+    (Multiply (force (nth (ad var) 0)) (Exp a))))
 
-(defn log-diff [_ args]
+(defn log-diff [a ad]
   (fn [_ var]
-    (Multiply (diff (nth args 0) var) (Divide (Constant 1) (nth args 0)))))
+    (Multiply (force (nth (ad var) 0)) (Divide (Constant 1) a))))
 
-; it breaks evaluate
-(defn Add [& args] (op-cons op-proto + add-sub-diff "add" args))
-(defn Subtract [& args] (op-cons op-proto - add-sub-diff "subtract" args))
-(defn Divide [& args] (op-cons divide-proto / quotient-diff "divide" args))
-(defn Multiply [& args] (op-cons op-proto * mult-diff "multiply" args))
-(defn Negate [arg] (op-cons op-proto - negate-diff "negate" [arg]))
-(defn Exp [arg] (op-cons op-proto (fn [a] (Math/exp a)) exp-diff "exp" [arg]))
-(defn Ln [arg] (op-cons ln-proto (fn [a] (Math/log a)) log-diff "ln" [arg]))
+(defn make-diff-map [args]
+  (letfn [(get-diff [var] (mapv (fn [arg] (delay (diff arg var))) args))]
+    {
+     "x" (get-diff "x")
+     "y" (get-diff "y")
+     "z" (get-diff "z")
+     }))
 
-(defn method [key]
-  (fn [this & args] (apply proto-call this key args)))
+(defn diff-fnc [args f] (common-diff args (make-diff-map args) f))
 
-(defn op-map [arg]
-  (cond (= '+ arg) Add
-        (= '- arg) Subtract
-        (= '* arg) Multiply
-        (= '/ arg) Divide
-        (= 'negate arg) Negate
-        (= 'exp arg) Exp
-        (= 'ln arg) Ln
-        :else nil))
+(def operation-bones (partial op-cons op-proto))
 
-(defn parse [l]
+(defn Add [& args] (operation-bones + (diff-fnc args add-diff) "+" args))
+(defn Subtract [& args] (operation-bones - (diff-fnc args sub-diff) "-" args))
+(defn Divide [& args] (operation-bones safe-division (diff-fnc args quotient-diff) "/" args))
+(defn Multiply [& args] (operation-bones * (diff-fnc args mult-diff) "*" args))
+(defn Negate [& arg] (operation-bones - (negate-diff (make-diff-map arg)) "negate" arg))
+(defn Exp [& arg] (operation-bones #(Math/exp %) (exp-diff (nth arg 0) (make-diff-map arg)) "exp" arg))
+(defn Ln [& arg] (operation-bones (fn [u] (Math/log (Math/abs u))) (log-diff (nth arg 0) (make-diff-map arg)) "ln" arg))
+
+;parser
+
+(defn -return [value tail] {:value value :tail tail})
+(def -valid? boolean)
+(def -value :value)
+(def -tail :tail)
+
+(defn _show [result]
+  (if (-valid? result) (str "-> " (pr-str (-value result)) " | " (pr-str (apply str (-tail result))))
+                       "!"))
+(defn tabulate [parser inputs]
+  (run! (fn [input] (printf "    %-10s %s\n" (pr-str input) (_show (parser input)))) inputs))
+
+(defn _empty [value] (partial -return value))
+
+(defn _char [p]
+  (fn [[c & cs]]
+    (if (and c (p c)) (-return c cs))))
+
+(defn _map [f result]
+  (if (-valid? result)
+    (-return (f (-value result)) (-tail result))))
+
+(defn _combine [f a b]
+  (fn [str]
+    (let [ar ((force a) str)]
+      (if (-valid? ar)
+        (_map (partial f (-value ar))
+              ((force b) (-tail ar)))))))
+
+(defn _either [a b]
+  (fn [str]
+    (let [ar ((force a) str)]
+      (if (-valid? ar) ar ((force b) str)))))
+
+(defn _parser [p]
+  (fn [input]
+    (-value ((_combine (fn [v _] v) p (_char #{\u0000})) (str input \u0000)))))
+
+(defn +char [chars] (_char (set chars)))
+
+(defn +char-not [chars] (_char (comp not (set chars))))
+
+(defn +map [f parser] (comp (partial _map f) parser))
+
+(def +parser _parser)
+
+(def +ignore (partial +map (constantly 'ignore)))
+
+(defn iconj [coll value]
+  (if (= value 'ignore) coll (conj coll value)))
+(defn +seq [& ps]
+  (reduce (partial _combine iconj) (_empty []) ps))
+
+(defn +seqf [f & ps] (+map (partial apply f) (apply +seq ps)))
+
+(defn +seqn [n & ps] (apply +seqf (fn [& vs] (nth vs n)) ps))
+
+(defn +or [p & ps]
+  (reduce _either p ps))
+
+(defn +opt [p]
+  (+or p (_empty nil)))
+
+(defn +star [p]
+  (letfn [(rec [] (+or (+seqf cons p (delay (rec))) (_empty ())))] (rec)))
+
+(defn +plus [p] (+seqf cons p (+star p)))
+
+(defn +str [p] (+map (partial apply str) p))
+
+; grammar
+
+(def *digit (+char "0123456789.-"))
+(def *number (+map read-string (+str (+plus *digit))))
+(def *space (+char " \t\n\r"))
+(def *ws (+ignore (+star *space)))
+(declare expression)
+(def *letter (+char "xyzXYZ"))
+(def *variable (+plus *letter))
+(def bracket (+or (+ignore (+char "(")) (+ignore (+char ")"))))
+(def operand (+or *number *variable (delay expression)))
+(def operation (+or (+str (+seq (+char "n") (+char "e") (+char "g") (+char "a") (+char "t") (+char "e")))
+                    (+char "-+*/")))
+(def binary (+seq *ws bracket *ws operand *ws operand *ws operation *ws bracket))
+(def unary (+seq *ws bracket *ws operand *ws operation *ws bracket))
+(def bare (+seqn 0 *ws (+or *number *variable) *ws))
+(def expression (+or unary binary bare))
+
+(defn parse [suffix? l]
   (cond (number? l) (Constant (double l))
-        (symbol? l) (Variable (name l))
-        :else (apply (op-map (first l)) (mapv parse (rest l)))))
+        ((if suffix? (fn [u] (= (type u) clojure.lang.Cons)) symbol?) l) (if suffix? (Variable (string/join "" (mapv (fn [u] u) l))) (Variable (str l)))
+        :else (let [operation (if suffix? (last l) (first l))
+                    operands (if suffix? (drop-last l) (rest l))]
+                (apply (op-map operation) (mapv (partial parse suffix?) operands)))))
 
-(defn parseObject [str] (parse (read-string str)))
+(defn parseObjectSuffix [str] (parse true ((expression str) :value)))
+(defn parseObject [str] (parse false (read-string str)))
